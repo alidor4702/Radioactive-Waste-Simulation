@@ -373,81 +373,190 @@ class Renderer:
                 glow_surf.fill((*bar_color, int(40 * pulse)))
                 self.screen.blit(glow_surf, (bar_x, bar_y - 2))
 
+    # ── Scrollable Sidebar ───────────────────────────────────────────────
+
     def _draw_sidebar(self, model):
         sb_x = self.grid_offset_x + GRID_COLS * CELL_SIZE + 16
         sb_y = HUD_HEIGHT + 8
         sb_w = SIDEBAR_WIDTH - 32
+        sb_h = WINDOW_HEIGHT - sb_y - 8
 
         # Panel background
-        panel_rect = (sb_x - 8, sb_y, sb_w + 16, WINDOW_HEIGHT - sb_y - 8)
+        panel_rect = (sb_x - 8, sb_y, sb_w + 16, sb_h)
         pygame.draw.rect(self.screen, (28, 28, 40), panel_rect, border_radius=6)
         pygame.draw.rect(self.screen, (50, 50, 65), panel_rect, 1, border_radius=6)
 
-        y = sb_y + 12
+        # Render all sidebar content to a virtual surface, then blit with scroll
+        content_h = self._measure_sidebar_content(model, sb_w)
+        content_surface = pygame.Surface((sb_w, max(content_h, sb_h)), pygame.SRCALPHA)
+        content_surface.fill((0, 0, 0, 0))
 
-        # Waste breakdown chart
-        y = self._draw_mini_chart(
-            model, sb_x, y, sb_w, 130, "WASTE COUNT",
+        y = 12  # local y within content surface
+        y = self._sb_draw_charts(content_surface, model, 0, y, sb_w)
+        y += 12
+        y = self._sb_draw_pipeline_stats(content_surface, model, 0, y, sb_w)
+        y += 12
+        y = self._sb_draw_agent_cards(content_surface, model, 0, y, sb_w)
+        y += 12
+
+        if getattr(_cfg, "DEBUG_HEATMAPS_ENABLED", True):
+            y = self._sb_draw_heatmaps(content_surface, model, 0, y, sb_w)
+            y += 12
+
+        if getattr(_cfg, "DEBUG_STEP_LOG_ENABLED", False):
+            y = self._sb_draw_decisions(content_surface, model, 0, y, sb_w)
+            y += 12
+
+        y = self._sb_draw_message_log(content_surface, model, 0, y, sb_w)
+        y += 12
+
+        # Update scroll limits
+        self._scroll_max = max(0, y - sb_h)
+        self._scroll_y = min(self._scroll_y, self._scroll_max)
+
+        # Clip and blit the scrolled region
+        clip_rect = pygame.Rect(0, self._scroll_y, sb_w, sb_h)
+        sub = content_surface.subsurface(clip_rect)
+        self.screen.blit(sub, (sb_x, sb_y))
+
+        # Scroll indicator
+        if self._scroll_max > 0:
+            track_h = sb_h - 8
+            thumb_h = max(20, int(track_h * sb_h / max(1, y)))
+            thumb_y = sb_y + 4 + int((track_h - thumb_h) * self._scroll_y / max(1, self._scroll_max))
+            thumb_x = sb_x + sb_w + 4
+            pygame.draw.rect(self.screen, (50, 50, 65), (thumb_x, sb_y + 4, 4, track_h), border_radius=2)
+            pygame.draw.rect(self.screen, (100, 100, 130), (thumb_x, thumb_y, 4, thumb_h), border_radius=2)
+
+    def _measure_sidebar_content(self, model, sb_w):
+        """Estimate total content height for scroll calculation."""
+        y = 12
+        # Charts: waste + energy
+        y += 16 + 100 + 16 + 16 + 100  # two charts
+        y += 12
+        # Pipeline stats
+        y += 20 + 3 * 16 + 8
+        y += 12
+        # Agent cards
+        y += 20 + len(model.robots) * 56
+        y += 12
+        # Heatmaps
+        if getattr(_cfg, "DEBUG_HEATMAPS_ENABLED", True):
+            y += 16 + 60 + 18
+            y += 12
+        # Decisions
+        if getattr(_cfg, "DEBUG_STEP_LOG_ENABLED", False):
+            y += 16 + len(model.robots) * 14 + 8
+            y += 12
+        # Message log
+        y += 20 + min(15, len(getattr(model, "message_log", []))) * 13 + 8
+        y += 12
+        return y
+
+    def _sb_draw_charts(self, surf, model, x, y, w):
+        """Draw waste count and energy charts."""
+        y = self._draw_mini_chart_on_surface(
+            surf, model, x, y, w, 100, "WASTE COUNT",
             [("green_waste", COLOR_GREEN_WASTE),
              ("yellow_waste", COLOR_YELLOW_WASTE),
              ("red_waste", COLOR_RED_WASTE)])
-
         y += 16
-
-        # Total waste vs threshold
-        y = self._draw_mini_chart(
-            model, sb_x, y, sb_w, 130, "LIFE BY ROBOT TYPE",
+        y = self._draw_mini_chart_on_surface(
+            surf, model, x, y, w, 100, "LIFE BY ROBOT TYPE",
             [("avg_energy_green", COLOR_GREEN_ROBOT),
              ("avg_energy_yellow", COLOR_YELLOW_ROBOT),
              ("avg_energy_red", COLOR_RED_ROBOT)],
             threshold=AGENT_MAX_ENERGY)
+        return y
 
-        y += 16
+    def _sb_draw_pipeline_stats(self, surf, model, x, y, w):
+        """Draw pipeline stats: pickups/transforms/deliveries per type."""
+        self._surf_text(surf, "PIPELINE", x, y, self.font_large, TEXT_COLOR)
+        y += 20
 
-        # Live heatmaps (debug): per-robot visit frequency
-        if getattr(_cfg, "DEBUG_HEATMAPS_ENABLED", True):
-            y = self._draw_robot_heatmaps(model, sb_x, y, sb_w)
+        stats = getattr(model, "pipeline_stats", {})
+        for rtype, label_color in [("green", COLOR_GREEN_ROBOT), ("yellow", COLOR_YELLOW_ROBOT), ("red", COLOR_RED_ROBOT)]:
+            s = stats.get(rtype, {})
+            pick = s.get("pickups", 0)
+            trans = s.get("transforms", 0)
+            deliv = s.get("deliveries", 0)
+            disp = s.get("disposals", 0)
+            if rtype == "red":
+                text = f"{rtype[0].upper()}: pick={pick} disp={disp}"
+            else:
+                text = f"{rtype[0].upper()}: pick={pick} xform={trans} drop={deliv}"
+            self._surf_text(surf, text, x + 4, y, self.font, label_color)
             y += 16
+        return y
 
-        if getattr(_cfg, "DEBUG_STEP_LOG_ENABLED", False):
-            y = self._draw_decision_debug_panel(model, sb_x, y, sb_w)
-            y += 12
-
-        # Agent roster
-        self._draw_text("AGENTS", sb_x, y, self.font_large, TEXT_COLOR)
-        y += 24
-
-        robot_colors = {
-            "green": COLOR_GREEN_ROBOT,
-            "yellow": COLOR_YELLOW_ROBOT,
-            "red": COLOR_RED_ROBOT,
-        }
+    def _sb_draw_agent_cards(self, surf, model, x, y, w):
+        """Draw detailed agent cards with energy bar, inventory, intention."""
+        self._surf_text(surf, "AGENTS", x, y, self.font_large, TEXT_COLOR)
+        y += 20
 
         for robot in sorted(model.robots, key=lambda r: (r.robot_type, r.agent_id)):
-            if y > WINDOW_HEIGHT - 30:
-                break
-            color = robot_colors.get(robot.robot_type, TEXT_COLOR)
+            color = _ROBOT_COLORS.get(robot.robot_type, TEXT_COLOR)
+            card_h = 52
 
-            # Robot icon (tiny colored square)
-            pygame.draw.rect(self.screen, color, (sb_x, y + 2, 8, 8), border_radius=2)
+            # Card background
+            pygame.draw.rect(surf, (22, 22, 34), (x, y, w, card_h), border_radius=4)
+            pygame.draw.rect(surf, (45, 45, 58), (x, y, w, card_h), 1, border_radius=4)
 
-            # Info
-            inv_str = ""
+            # Robot icon + name
+            pygame.draw.rect(surf, color, (x + 4, y + 4, 8, 8), border_radius=2)
+            name = f"{robot.robot_type[0].upper()}{robot.agent_id} ({robot.x},{robot.y})"
+            self._surf_text(surf, name, x + 16, y + 2, self.font, color)
+
+            # Energy bar
+            if ENERGY_ENABLED:
+                bar_x = x + 16
+                bar_y_local = y + 16
+                bar_w = w - 24
+                bar_h = 6
+                pygame.draw.rect(surf, (40, 40, 55), (bar_x, bar_y_local, bar_w, bar_h), border_radius=2)
+                ratio = robot.energy / AGENT_MAX_ENERGY if AGENT_MAX_ENERGY > 0 else 0
+                fill_w = int(bar_w * ratio)
+                if fill_w > 0:
+                    if ratio > 0.5:
+                        ec = (80, 220, 80)
+                    elif ratio > 0.2:
+                        ec = (220, 200, 40)
+                    else:
+                        ec = (220, 60, 60)
+                    pygame.draw.rect(surf, ec, (bar_x, bar_y_local, fill_w, bar_h), border_radius=2)
+                # Energy number
+                e_text = f"{int(robot.energy)}/{AGENT_MAX_ENERGY}"
+                self._surf_text(surf, e_text, bar_x + bar_w - 50, bar_y_local - 1, self.font_small, (160, 160, 180))
+
+            # Inventory dots
+            inv_y = y + 26
             if robot.inventory:
-                counts = {}
-                for w in robot.inventory:
-                    counts[w] = counts.get(w, 0) + 1
-                inv_str = " ".join(f"{c}{t[0].upper()}" for t, c in counts.items())
+                dot_x = x + 16
+                for i, wtype in enumerate(robot.inventory[:12]):
+                    wc = _WASTE_COLORS.get(wtype, (200, 200, 200))
+                    pygame.draw.circle(surf, wc, (dot_x + i * 7 + 3, inv_y + 3), 3)
+            else:
+                self._surf_text(surf, "empty", x + 16, inv_y - 1, self.font_small, (70, 70, 90))
 
-            info = f" {robot.robot_type[0].upper()}{robot.agent_id}  ({robot.x},{robot.y})"
-            if inv_str:
-                info += f"  [{inv_str}]"
+            # Intention + target
+            intent = robot.knowledge.get("decision_reason", robot.knowledge.get("current_intention", "?"))
+            target = robot.knowledge.get("decision_target") or robot.knowledge.get("intention_target")
+            survival = robot.knowledge.get("survival_mode", False)
+            status_parts = [intent]
+            if target:
+                status_parts.append(f"t={target}")
+            if survival:
+                status_parts.append("SOS")
+            status = " | ".join(status_parts)
+            status_color = (220, 80, 80) if survival else (130, 130, 150)
+            self._surf_text(surf, status, x + 4, y + 38, self.font_small, status_color)
 
-            self._draw_text(info, sb_x + 12, y, self.font, color)
-            y += 16
+            y += card_h + 4
+        return y
 
-    def _draw_robot_heatmaps(self, model, x, y, w):
-        self._draw_text("HEATMAPS (VISITS)", x, y, self.font, (140, 140, 160))
+    def _sb_draw_heatmaps(self, surf, model, x, y, w):
+        """Draw per-robot visit heatmaps."""
+        self._surf_text(surf, "HEATMAPS", x, y, self.font, (140, 140, 160))
         y += 16
 
         robots = sorted(model.robots, key=lambda r: r.agent_id)[:3]
@@ -460,82 +569,121 @@ class Renderer:
 
         for idx, robot in enumerate(robots):
             px = x + idx * (cell_w + gap)
-            self._draw_single_robot_heatmap(robot, px, y, cell_w, map_h)
+            role_color = _ROBOT_COLORS.get(robot.robot_type, (180, 180, 180))
+            title = f"{robot.robot_type[0].upper()}{robot.agent_id}"
+            self._surf_text(surf, title, px, y - 14, self.font, role_color)
+            pygame.draw.rect(surf, (18, 18, 28), (px, y, cell_w, map_h), border_radius=3)
+            pygame.draw.rect(surf, (45, 45, 58), (px, y, cell_w, map_h), 1, border_radius=3)
+
+            visited = robot.knowledge.get("visited_count", {})
+            if visited:
+                max_visit = max(1, max(visited.values()))
+                px_w = max(1, cell_w // GRID_COLS)
+                px_h = max(1, map_h // GRID_ROWS)
+                for gx in range(GRID_COLS):
+                    for gy in range(GRID_ROWS):
+                        count = visited.get((gx, gy), 0)
+                        if count <= 0:
+                            continue
+                        intensity = min(1.0, count / max_visit)
+                        c = (
+                            int(role_color[0] * intensity),
+                            int(role_color[1] * intensity),
+                            int(role_color[2] * intensity),
+                        )
+                        rx = px + gx * px_w
+                        ry = y + gy * px_h
+                        pygame.draw.rect(surf, c, (rx, ry, px_w, px_h))
 
         return y + map_h + 18
 
-    def _draw_single_robot_heatmap(self, robot, x, y, w, h):
-        role_color = {
-            "green": COLOR_GREEN_ROBOT,
-            "yellow": COLOR_YELLOW_ROBOT,
-            "red": COLOR_RED_ROBOT,
-        }.get(robot.robot_type, (180, 180, 180))
-
-        title = f"{robot.robot_type[0].upper()}{robot.agent_id}"
-        self._draw_text(title, x, y - 14, self.font, role_color)
-
-        pygame.draw.rect(self.screen, (18, 18, 28), (x, y, w, h), border_radius=3)
-        pygame.draw.rect(self.screen, (45, 45, 58), (x, y, w, h), 1, border_radius=3)
-
-        visited = robot.knowledge.get("visited_count", {})
-        if not visited:
-            return
-
-        max_visit = max(1, max(visited.values()))
-        px_w = max(1, w // GRID_COLS)
-        px_h = max(1, h // GRID_ROWS)
-
-        for gx in range(GRID_COLS):
-            for gy in range(GRID_ROWS):
-                count = visited.get((gx, gy), 0)
-                if count <= 0:
-                    continue
-                intensity = min(1.0, count / max_visit)
-                color = (
-                    int(role_color[0] * intensity),
-                    int(role_color[1] * intensity),
-                    int(role_color[2] * intensity),
-                )
-                rx = x + gx * px_w
-                ry = y + gy * px_h
-                pygame.draw.rect(self.screen, color, (rx, ry, px_w, px_h))
-
-    def _draw_decision_debug_panel(self, model, x, y, w):
-        self._draw_text("DECISIONS", x, y, self.font, (140, 140, 160))
+    def _sb_draw_decisions(self, surf, model, x, y, w):
+        """Draw decision debug panel."""
+        self._surf_text(surf, "DECISIONS", x, y, self.font, (140, 140, 160))
         y += 16
 
-        panel_h = min(96, WINDOW_HEIGHT - y - 40)
-        if panel_h < 24:
-            return y
-
-        pygame.draw.rect(self.screen, (18, 18, 28), (x, y, w, panel_h), border_radius=4)
-        pygame.draw.rect(self.screen, (45, 45, 58), (x, y, w, panel_h), 1, border_radius=4)
+        panel_h = max(24, len(model.robots) * 14 + 8)
+        pygame.draw.rect(surf, (18, 18, 28), (x, y, w, panel_h), border_radius=4)
+        pygame.draw.rect(surf, (45, 45, 58), (x, y, w, panel_h), 1, border_radius=4)
 
         line_y = y + 4
         for robot in sorted(model.robots, key=lambda r: r.agent_id):
-            if line_y > y + panel_h - 14:
-                break
             target = robot.knowledge.get("decision_target") or robot.knowledge.get("intention_target")
             reason = robot.knowledge.get("decision_reason", "")
             action = robot.knowledge.get("last_action", "-")
-            text = f"R{robot.agent_id} a={action} t={target if target is not None else '-'} why={reason if reason else '-'}"
-            color = {
-                "green": COLOR_GREEN_ROBOT,
-                "yellow": COLOR_YELLOW_ROBOT,
-                "red": COLOR_RED_ROBOT,
-            }.get(robot.robot_type, TEXT_COLOR)
-            self._draw_text(text, x + 6, line_y, self.font, color)
+            text = f"R{robot.agent_id} a={action} t={target if target is not None else '-'} {reason}"
+            color = _ROBOT_COLORS.get(robot.robot_type, TEXT_COLOR)
+            self._surf_text(surf, text, x + 6, line_y, self.font_small, color)
             line_y += 14
 
         return y + panel_h
 
-    def _draw_mini_chart(self, model, x, y, w, h, title, series, threshold=None):
-        self._draw_text(title, x, y, self.font, (140, 140, 160))
+    def _sb_draw_message_log(self, surf, model, x, y, w):
+        """Draw recent inter-agent messages."""
+        messages = getattr(model, "message_log", [])
+        self._surf_text(surf, f"MESSAGES ({len(messages)})", x, y, self.font_large, TEXT_COLOR)
+        y += 20
+
+        if not messages:
+            self._surf_text(surf, "No messages yet", x + 4, y, self.font_small, (70, 70, 90))
+            return y + 14
+
+        panel_h = min(15, len(messages)) * 13 + 8
+        pygame.draw.rect(surf, (18, 18, 28), (x, y, w, panel_h), border_radius=4)
+        pygame.draw.rect(surf, (45, 45, 58), (x, y, w, panel_h), 1, border_radius=4)
+
+        line_y = y + 4
+        # Show most recent messages first, limited to 15
+        recent = messages[-15:]
+        for msg in reversed(recent):
+            if line_y > y + panel_h - 10:
+                break
+            tick = msg.get("tick", "?")
+            from_type = msg.get("from_type", "?")
+            msg_type = msg.get("type", "?")
+            content = msg.get("content", {})
+
+            from_color = _ROBOT_COLORS.get(from_type, (160, 160, 160))
+
+            # Compact message display
+            if msg_type == "waste_found":
+                wtype = content.get("waste_type", "?")
+                pos = content.get("pos", "?")
+                text = f"T{tick} {from_type[0].upper()}: found {wtype[0].upper()} @{pos}"
+            elif msg_type == "waste_picked":
+                wtype = content.get("waste_type", "?")
+                pos = content.get("pos", "?")
+                text = f"T{tick} {from_type[0].upper()}: picked {wtype[0].upper()} @{pos}"
+            elif msg_type == "need_pickup":
+                wtype = content.get("waste_type", "?")
+                pos = content.get("pos", "?")
+                text = f"T{tick} {from_type[0].upper()}: dropped {wtype[0].upper()} @{pos}"
+            elif msg_type == "load_status":
+                role = content.get("role", "?")
+                avail = content.get("available", 0)
+                intent = content.get("intention", "?")
+                text = f"T{tick} {role[0].upper()}: avail={avail} {intent}"
+            else:
+                text = f"T{tick} {from_type[0].upper()}: {msg_type}"
+
+            # Truncate to fit
+            max_chars = w // 7
+            if len(text) > max_chars:
+                text = text[:max_chars - 2] + ".."
+
+            self._surf_text(surf, text, x + 4, line_y, self.font_small, from_color)
+            line_y += 13
+
+        return y + panel_h
+
+    def _draw_mini_chart_on_surface(self, surf, model, x, y, w, h, title, series, threshold=None):
+        """Draw a mini chart onto a surface (for scrollable sidebar)."""
+        self._surf_text(surf, title, x, y, self.font, (140, 140, 160))
         y += 16
 
         chart_rect = (x, y, w, h)
-        pygame.draw.rect(self.screen, (18, 18, 28), chart_rect, border_radius=4)
-        pygame.draw.rect(self.screen, (45, 45, 58), chart_rect, 1, border_radius=4)
+        pygame.draw.rect(surf, (18, 18, 28), chart_rect, border_radius=4)
+        pygame.draw.rect(surf, (45, 45, 58), chart_rect, 1, border_radius=4)
 
         if not model.history["tick"] or len(model.history["tick"]) < 2:
             return y + h
@@ -564,25 +712,44 @@ class Renderer:
                 shifted = [(px - x, py - y) for px, py in area_points]
                 if len(shifted) >= 3:
                     pygame.draw.polygon(fill_surf, fill_color, shifted)
-                    self.screen.blit(fill_surf, (x, y))
+                    surf.blit(fill_surf, (x, y))
 
                 # Line
-                pygame.draw.lines(self.screen, color, False, points, 2)
+                pygame.draw.lines(surf, color, False, points, 2)
 
                 # Current value label
                 val = data[-1]
-                val_txt = self.font.render(str(val), True, color)
-                self.screen.blit(val_txt, (points[-1][0] - 20, points[-1][1] - 14))
+                val_txt = self.font.render(str(int(val)), True, color)
+                surf.blit(val_txt, (points[-1][0] - 20, points[-1][1] - 14))
 
         if threshold:
             max_val = max(max(model.history[series[0][0]][-n:]), threshold * 1.1)
             ty = y + h - margin - int(threshold / max_val * (h - margin * 2))
             # Dashed threshold line
             for dash_x in range(x + margin, x + w - margin, 6):
-                pygame.draw.line(self.screen, (220, 60, 60),
+                pygame.draw.line(surf, (220, 60, 60),
                                  (dash_x, ty), (min(dash_x + 3, x + w - margin), ty), 1)
 
         return y + h
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    def _surf_text(self, surf, text, x, y, font, color):
+        """Render text onto an arbitrary surface."""
+        rendered = font.render(text, True, color)
+        surf.blit(rendered, (x, y))
+
+    def _draw_text(self, text, x, y, font, color):
+        surf = font.render(text, True, color)
+        self.screen.blit(surf, (x, y))
+
+    def emit_particles(self, grid_pos, color, count=8):
+        sx, sy = self._grid_to_screen(*grid_pos)
+        cx = sx + CELL_SIZE // 2
+        cy = sy + CELL_SIZE // 2
+        self.sprite_cache.particle_system.emit(cx, cy, color, count)
+
+    # ── Game over / success overlays ─────────────────────────────────────
 
     def _draw_human_highlight(self, model):
         """Draw a pulsing diamond highlight around the human-controlled robot."""
@@ -662,14 +829,9 @@ class Renderer:
         self.screen.blit(inv_label, (x, bar_y + 7))
         x += inv_label.get_width() + 4
 
-        waste_colors = {
-            "green": COLOR_GREEN_WASTE,
-            "yellow": COLOR_YELLOW_WASTE,
-            "red": COLOR_RED_WASTE,
-        }
         if robot.inventory:
             for i, wtype in enumerate(robot.inventory[:12]):
-                wc = waste_colors.get(wtype, (200, 200, 200))
+                wc = _WASTE_COLORS.get(wtype, (200, 200, 200))
                 pygame.draw.circle(self.screen, wc, (x + i * 8 + 3, bar_y + 14), 3)
             x += min(len(robot.inventory), 12) * 8 + 8
         else:
@@ -697,7 +859,6 @@ class Renderer:
             ratio = robot.energy / AGENT_MAX_ENERGY if AGENT_MAX_ENERGY > 0 else 0
             fill_w = int(ebar_w * ratio)
             if fill_w > 0:
-                # Green when full, yellow mid, red when low
                 if ratio > 0.5:
                     ec = (80, 220, 80)
                 elif ratio > 0.2:
@@ -789,13 +950,3 @@ class Renderer:
         hint_rect = hint.get_rect(center=(WINDOW_WIDTH // 2,
                                            WINDOW_HEIGHT // 2 + 60))
         self.screen.blit(hint, hint_rect)
-
-    def _draw_text(self, text, x, y, font, color):
-        surf = font.render(text, True, color)
-        self.screen.blit(surf, (x, y))
-
-    def emit_particles(self, grid_pos, color, count=8):
-        sx, sy = self._grid_to_screen(*grid_pos)
-        cx = sx + CELL_SIZE // 2
-        cy = sy + CELL_SIZE // 2
-        self.sprite_cache.particle_system.emit(cx, cy, color, count)
