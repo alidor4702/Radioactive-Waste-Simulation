@@ -6,7 +6,7 @@
 
 """
 Pygame renderer with retro pixel-art aesthetic.
-Smooth agent movement, particle effects, detailed HUD and live charts.
+Smooth agent movement, particle effects, detailed HUD and scrollable sidebar.
 """
 
 import pygame
@@ -24,6 +24,18 @@ from src.config import (
 )
 from src.sprites import SpriteCache
 
+_ROBOT_COLORS = {
+    "green": COLOR_GREEN_ROBOT,
+    "yellow": COLOR_YELLOW_ROBOT,
+    "red": COLOR_RED_ROBOT,
+}
+
+_WASTE_COLORS = {
+    "green": COLOR_GREEN_WASTE,
+    "yellow": COLOR_YELLOW_WASTE,
+    "red": COLOR_RED_WASTE,
+}
+
 
 class Renderer:
 
@@ -35,22 +47,31 @@ class Renderer:
         self.grid_offset_y = HUD_HEIGHT + 8
         self.frame_count = 0
 
-        # Smooth movement tracking: agent_id -> {from, to, progress}
+        # Smooth movement tracking: agent_id -> {x, y}
         self._agent_positions = {}
 
         # Camera shake
         self._shake_intensity = 0
         self._shake_offset = (0, 0)
 
+        # Sidebar scroll state
+        self._scroll_y = 0
+        self._scroll_max = 0  # computed each frame
+
         # Fonts
         self.font = pygame.font.SysFont("Courier", FONT_SIZE, bold=True)
         self.font_large = pygame.font.SysFont("Courier", FONT_SIZE_LARGE, bold=True)
         self.font_title = pygame.font.SysFont("Courier", 28, bold=True)
         self.font_huge = pygame.font.SysFont("Courier", 56, bold=True)
+        self.font_small = pygame.font.SysFont("Courier", 11, bold=True)
 
         # Pre-render grid surface (static tiles)
         self._grid_surface = None
         self._build_grid_surface()
+
+    def handle_scroll(self, dy):
+        """Handle mouse wheel scroll events. dy > 0 = scroll up, dy < 0 = scroll down."""
+        self._scroll_y = max(0, min(self._scroll_max, self._scroll_y - dy * 20))
 
     def _build_grid_surface(self):
         w = GRID_COLS * CELL_SIZE
