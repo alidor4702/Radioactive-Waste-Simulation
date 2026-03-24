@@ -60,7 +60,7 @@ DISPOSAL_ZONE_COL = -1
 # =============================================================================
 
 # Starting conditions
-INITIAL_GREEN_WASTE = 20        # green waste lumps at start (placed in zone 1)
+INITIAL_GREEN_WASTE = 15        # green waste lumps at start (placed in zone 1)
 
 # Spawning
 RADIATION_SPAWN_INTERVAL = 90   # ticks between new green waste spawns
@@ -84,7 +84,7 @@ NUM_RED_ROBOTS = 1              # operate in zones 1-2-3
 
 # Agent capabilities
 AGENT_MAX_CARRY = 10            # max waste items a single robot can hold
-AGENT_TICK_RATE = 10            # game frames between each agent decision
+AGENT_TICK_RATE = 12            # game frames between each agent decision
                                 #   lower = faster agents, higher = slower agents
 
 
