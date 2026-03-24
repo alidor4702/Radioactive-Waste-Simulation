@@ -68,6 +68,10 @@ class RobotMission:
             "red": {"pickups": 0, "transforms": 0, "disposals": 0},
         }
 
+        # Message log: last 50 messages for sidebar display
+        self.message_log = []
+        self._message_log_max = 50
+
         # Analytics history
         self.history = {
             "tick": [],
@@ -198,6 +202,21 @@ class RobotMission:
         # Move current tick messages to pending for next tick delivery
         self._pending_messages = list(self.message_board)
         self.total_messages_sent += len(self.message_board)
+
+        # Log messages for sidebar display
+        for msg in self.message_board:
+            entry = {
+                "tick": self.tick,
+                "from": msg.get("from"),
+                "from_type": msg.get("from_type", "?"),
+                "type": msg.get("type", "?"),
+                "content": msg.get("content", {}),
+            }
+            self.message_log.append(entry)
+        # Keep only the last N messages
+        if len(self.message_log) > self._message_log_max:
+            self.message_log = self.message_log[-self._message_log_max:]
+
         self.message_board.clear()
 
     # -- Percepts --------------------------------------------------------------
