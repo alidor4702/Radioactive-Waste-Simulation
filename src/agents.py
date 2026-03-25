@@ -595,22 +595,12 @@ class RobotAgent:
         return steps * move_cost + action_cost
 
     def _nearest_decon(self, knowledge):
-        """Return the nearest known (or default) decontamination position."""
-        known = list(knowledge.get("known_decontamination", set()))
-        if not known:
-            mid_row = GRID_ROWS // 2
-            defaults = []
-            if 1 in self.allowed_zones:
-                defaults.append(((0 + (ZONE_1_END - 1)) // 2, mid_row))
-            if 2 in self.allowed_zones:
-                defaults.append(((ZONE_1_END + (ZONE_2_END - 1)) // 2, mid_row))
-            if 3 in self.allowed_zones:
-                defaults.append(((ZONE_2_END + (GRID_COLS - 1)) // 2, mid_row))
-            known = defaults
+        """Return the nearest decontamination position (known + defaults)."""
+        candidates = self._all_decon_candidates(knowledge)
         pos = knowledge.get("pos", self.pos)
-        if not known:
+        if not candidates:
             return None
-        return min(known, key=lambda p: self._manhattan(pos, p))
+        return min(candidates, key=lambda p: self._manhattan(pos, p))
 
     def _can_complete_cycle(self, knowledge, waypoints, inventories=None, return_inv=None):
         """Check if agent can visit all waypoints and return to decon with enough energy.
@@ -703,55 +693,46 @@ class RobotAgent:
         knowledge["facing"] = "right" if target[0] > pos[0] else "left"
         return self._navigate_to_target(knowledge, target)
 
-    def _decontamination_action(self, knowledge):
-        """Return an action toward a decontamination zone when life is low."""
-        pos = knowledge["pos"]
-        known_decon = list(knowledge.get("known_decontamination", set()))
+    def _all_decon_candidates(self, knowledge):
+        """Return known decon zones plus default zone centers as candidates."""
+        candidates = set(knowledge.get("known_decontamination", set()))
+        mid_row = GRID_ROWS // 2
+        if 1 in self.allowed_zones:
+            candidates.add(((0 + (ZONE_1_END - 1)) // 2, mid_row))
+        if 2 in self.allowed_zones:
+            candidates.add(((ZONE_1_END + (ZONE_2_END - 1)) // 2, mid_row))
+        if 3 in self.allowed_zones:
+            candidates.add(((ZONE_2_END + (GRID_COLS - 1)) // 2, mid_row))
+        return list(candidates)
 
-        # Global decontamination rule: if carrying waste, drop before stepping
-        # onto a decontamination cell (or immediately if already on it).
+    def _decontamination_action(self, knowledge):
+        """Return an action toward the closest decontamination zone."""
+        pos = knowledge["pos"]
+        all_decon = self._all_decon_candidates(knowledge)
+
+        # If carrying waste, drop before stepping onto decon
         if knowledge.get("inventory"):
-            if pos in known_decon:
+            if pos in all_decon:
                 if self.has_energy_for(ACTION_DROP):
                     return ACTION_DROP
                 return ACTION_IDLE
-            if known_decon:
-                closest = min(
-                    known_decon,
-                    key=lambda p: abs(p[0] - pos[0]) + abs(p[1] - pos[1]),
-                )
+            if all_decon:
+                closest = min(all_decon, key=lambda p: self._manhattan(pos, p))
                 if self._manhattan(pos, closest) == 1:
                     if self.has_energy_for(ACTION_DROP):
                         return ACTION_DROP
                     return ACTION_IDLE
 
-        if pos in known_decon:
+        if pos in all_decon:
             return ACTION_IDLE
 
-        if known_decon:
-            closest = min(known_decon,
-                          key=lambda p: abs(p[0] - pos[0]) + abs(p[1] - pos[1]))
+        if all_decon:
+            closest = min(all_decon, key=lambda p: self._manhattan(pos, p))
             knowledge["facing"] = "right" if closest[0] > pos[0] else "left"
             return self._navigate_to_target(knowledge, closest)
 
-        # No known zone yet: move toward the nearest center of an accessible zone
-        mid_row = GRID_ROWS // 2
-        default_targets = []
-        if 1 in self.allowed_zones:
-            default_targets.append(((0 + (ZONE_1_END - 1)) // 2, mid_row))
-        if 2 in self.allowed_zones:
-            default_targets.append(((ZONE_1_END + (ZONE_2_END - 1)) // 2, mid_row))
-        if 3 in self.allowed_zones:
-            default_targets.append(((ZONE_2_END + (GRID_COLS - 1)) // 2, mid_row))
-
-        if default_targets:
-            target = min(default_targets,
-                         key=lambda p: abs(p[0] - pos[0]) + abs(p[1] - pos[1]))
-        else:
-            target = (pos[0], mid_row)
-
-        knowledge["facing"] = "right" if target[0] > pos[0] else "left"
-        return self._navigate_to_target(knowledge, target)
+        # Fallback (shouldn't happen with defaults above)
+        return self._random_move(pos, self.allowed_zones)
 
     def _assist_green(self, knowledge):
         """Move into zone 1 and explore to broadcast green waste for the green agent."""
