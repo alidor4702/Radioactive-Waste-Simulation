@@ -278,9 +278,14 @@ class RobotAgent:
                 wpos = content.get("pos")
                 wtype = content.get("waste_type")
                 if wpos is not None and wtype:
+                    # need_pickup for OUR target waste = permanent memory (never forget deliveries)
+                    if msg_type == "need_pickup" and wtype == self.target_waste:
+                        ttl = 999999
+                    else:
+                        ttl = KNOWLEDGE_WASTE_TTL
                     self.knowledge["known_waste"][tuple(wpos)] = {
                         "type": wtype,
-                        "ttl": KNOWLEDGE_WASTE_TTL,
+                        "ttl": ttl,
                     }
 
     def deliberate(self, knowledge):
@@ -312,9 +317,11 @@ class RobotAgent:
                 if msg["content"].get("waste_type") == self.target_waste:
                     pos = msg["content"]["pos"]
                     known = knowledge.setdefault("known_waste", {})
+                    # need_pickup = delivered waste, never forget it
+                    ttl = 999999 if msg["type"] == "need_pickup" else KNOWLEDGE_WASTE_TTL
                     known[pos] = {
                         "type": self.target_waste,
-                        "ttl": KNOWLEDGE_WASTE_TTL,
+                        "ttl": ttl,
                     }
                     return pos
         return None
@@ -736,6 +743,27 @@ class RobotAgent:
         target = (ZONE_1_END // 2, GRID_ROWS // 2)
         return self._navigate_to_target(knowledge, target)
 
+    def _can_carry_to_decon(self, knowledge):
+        """Check if agent can safely carry current inventory to nearest decon.
+        Returns True if the agent has enough energy to walk to decon while carrying."""
+        inv = knowledge.get("inventory", [])
+        if not inv:
+            return False
+        energy = knowledge.get("energy", 0)
+        pos = knowledge["pos"]
+        nearest = self._nearest_decon(knowledge)
+        if not nearest:
+            return False
+        dist = self._manhattan(pos, nearest)
+        if dist == 0:
+            # Already on decon — just drop
+            return True
+        carry_loss = self._carry_loss_for_inventory(inv)
+        cost_per_step = ENERGY_COST_MOVE + carry_loss
+        # +1 for the drop action, +3 safety margin
+        total_cost = dist * cost_per_step + ENERGY_COST_DROP + 3
+        return energy > total_cost
+
     def _recover_dropped_waste(self, knowledge):
         """If we dropped waste during survival, navigate back to pick it up.
         Returns an action if recovery is in progress, or None if nothing to recover."""
@@ -784,10 +812,16 @@ class GreenAgent(RobotAgent):
             if green_count >= self.transform_cost and self.has_energy_for(ACTION_TRANSFORM):
                 self._set_decision_debug(knowledge, "survive_transform_first")
                 return ACTION_TRANSFORM
-            if inv and self.has_energy_for(ACTION_DROP):
-                knowledge["dropped_waste"] = {"pos": pos, "types": list(inv)}
-                self._set_decision_debug(knowledge, "survive_drop")
-                return ACTION_DROP
+            if inv:
+                # Try to carry waste to decon instead of dropping in place
+                if self._can_carry_to_decon(knowledge):
+                    self._set_decision_debug(knowledge, "survive_carry_to_decon")
+                    return self._decontamination_action(knowledge)
+                # Can't make it — drop here then go heal
+                if self.has_energy_for(ACTION_DROP):
+                    knowledge["dropped_waste"] = {"pos": pos, "types": list(inv)}
+                    self._set_decision_debug(knowledge, "survive_drop")
+                    return ACTION_DROP
             self._set_decision_debug(knowledge, "survive_heal")
             return self._decontamination_action(knowledge)
 
@@ -885,10 +919,14 @@ class YellowAgent(RobotAgent):
             if yellow_count >= self.transform_cost and self.has_energy_for(ACTION_TRANSFORM):
                 self._set_decision_debug(knowledge, "survive_transform_first")
                 return ACTION_TRANSFORM
-            if inv and self.has_energy_for(ACTION_DROP):
-                knowledge["dropped_waste"] = {"pos": pos, "types": list(inv)}
-                self._set_decision_debug(knowledge, "survive_drop")
-                return ACTION_DROP
+            if inv:
+                if self._can_carry_to_decon(knowledge):
+                    self._set_decision_debug(knowledge, "survive_carry_to_decon")
+                    return self._decontamination_action(knowledge)
+                if self.has_energy_for(ACTION_DROP):
+                    knowledge["dropped_waste"] = {"pos": pos, "types": list(inv)}
+                    self._set_decision_debug(knowledge, "survive_drop")
+                    return ACTION_DROP
             self._set_decision_debug(knowledge, "survive_heal")
             return self._decontamination_action(knowledge)
 
@@ -1001,10 +1039,14 @@ class RedAgent(RobotAgent):
         # 1. SURVIVE - drop cargo and heal
         in_survival = self._needs_survival_mode(knowledge)
         if in_survival:
-            if inv and self.has_energy_for(ACTION_DROP):
-                knowledge["dropped_waste"] = {"pos": pos, "types": list(inv)}
-                self._set_decision_debug(knowledge, "survive_drop")
-                return ACTION_DROP
+            if inv:
+                if self._can_carry_to_decon(knowledge):
+                    self._set_decision_debug(knowledge, "survive_carry_to_decon")
+                    return self._decontamination_action(knowledge)
+                if self.has_energy_for(ACTION_DROP):
+                    knowledge["dropped_waste"] = {"pos": pos, "types": list(inv)}
+                    self._set_decision_debug(knowledge, "survive_drop")
+                    return ACTION_DROP
             self._set_decision_debug(knowledge, "survive_heal")
             return self._decontamination_action(knowledge)
 
